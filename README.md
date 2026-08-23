@@ -1,21 +1,27 @@
 <h1 align="center">⚡ Padlet Reaction Engine</h1>
 
 <p align="center">
-  <b>From ~40 seconds of browser automation to ~1.5 seconds of pure HTTP.</b>
+  <b>Replacing 40 seconds of Selenium with 1.5 seconds of HTTP —<br>
+  a reverse-engineering case study.</b>
 </p>
 
 <p align="center">
+  <a href="https://github.com/AhmedTheNetCoder/Padlet-Like-Bot/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/AhmedTheNetCoder/Padlet-Like-Bot/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Python" src="https://img.shields.io/badge/Python-3.9%2B-blue?logo=python&logoColor=white">
   <img alt="Requests" src="https://img.shields.io/badge/HTTP-requests-success">
   <img alt="Browser" src="https://img.shields.io/badge/Browser-not%20required-orange">
-  <img alt="Concurrency" src="https://img.shields.io/badge/Automation-threaded-purple">
-  <img alt="Use" src="https://img.shields.io/badge/Use-authorized%20testing%20only-red">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-yellow"></a>
 </p>
 
 <p align="center">
-  A Python proof-of-concept that reverse-engineers the network flow behind Padlet emoji
-  reactions and reproduces it with direct HTTP requests —
-  no Selenium, no Chrome, no WebDriver, no page rendering.
+  A Python case study in reverse-engineering the network flow behind a web app's UI and
+  reproducing it with direct HTTP requests — no Selenium, no Chrome, no WebDriver,
+  no page rendering. The worked example is Padlet's emoji reactions.
+</p>
+
+<p align="center">
+  <b>📖 <a href="HOW-I-FOUND-IT.md">Read the walkthrough</a></b> — the DevTools-to-Python
+  method, step by step, including the part where the replayed request fails and why.
 </p>
 
 ---
@@ -55,6 +61,7 @@ No GUI. No browser. No WebDriver. Just HTTP.
 | Talk to the API directly | ❌ | ✅ |
 | Typical run time | ~40 s | ~1.5 s |
 | Memory footprint | hundreds of MB | a few MB |
+| Testable without a browser | ❌ | ✅ |
 | Architecture | UI automation | HTTP workflow |
 
 The point isn't only speed. The real win is deleting an entire layer of moving parts that can break.
@@ -75,12 +82,15 @@ X-CSRF-Token: <token from the page HTML>
 { "wish_id": 123456, "value": "2764", "reaction_type": "emoji" }
 ```
 
-But firing that request on its own returns an error. The server expects two things the browser had already collected:
+But firing that request on its own returns `422`. The server expects two things the browser had already collected:
 
 1. **A valid anonymous session** — the cookies handed out by the first page load.
 2. **A matching CSRF token** — embedded in the page HTML as `<meta name="csrf-token">`.
 
 And the payload needs the post's **internal numeric id**, while the URL only exposes a public **hashid**. That gap is what the middle step resolves.
+
+> The full derivation — including which headers turn out to be load-bearing, and when this
+> technique *doesn't* work — is in **[HOW-I-FOUND-IT.md](HOW-I-FOUND-IT.md)**.
 
 ---
 
@@ -128,32 +138,29 @@ Everything hangs off one session, so cookies and the browser User-Agent carry ac
 
 ```python
 s = requests.Session()
-s.headers["User-Agent"] = UA
+s.headers["User-Agent"] = USER_AGENT
 ```
 
 **① Establish the session and read the CSRF token.**
 
 ```python
-page = s.get(url, timeout=TIMEOUT)
+page = s.get(cfg.url, timeout=cfg.timeout)
 page.raise_for_status()
 
-m = re.search(r'name="csrf-token"\s+content="([^"]+)"', page.text)
-if not m:
-    raise RuntimeError("Could not find CSRF token — page layout changed or blocked.")
-csrf = m.group(1)
+csrf = extract_csrf(page.text)  # <meta name="csrf-token" content="…">
+headers = build_api_headers(csrf, referer=cfg.url)
 ```
 
 **② Resolve the public hashid into the internal post id.**
 
 ```python
-hashid = url.rstrip("/").rsplit("/", 1)[-1]
+hashid = extract_hashid(cfg.url)  # .../wish/<hashid>
 
-look = s.get(f"https://padlet.com/api/9/wishes/{hashid}", headers=api, timeout=TIMEOUT)
+look = s.get(WISH_ENDPOINT.format(hashid=hashid), headers=headers, timeout=cfg.timeout)
 look.raise_for_status()
 
-attrs    = look.json()["data"]["attributes"]
-wish_id  = attrs["id"]
-headline = (attrs.get("headline") or "").strip()
+attrs = look.json()["data"]["attributes"]
+wish_id = attrs["id"]
 ```
 
 Reading the id at run time instead of hard-coding it means the script keeps working when the numeric id changes.
@@ -161,30 +168,26 @@ Reading the id at run time instead of hard-coding it means the script keeps work
 **③ Send the reaction.**
 
 ```python
-resp = s.post(
-    "https://padlet.com/api/7/reactions",
-    headers=api,
-    json={"wish_id": wish_id, "value": emoji, "reaction_type": "emoji"},
-    timeout=TIMEOUT,
-)
+payload = build_reaction_payload(wish_id, cfg.emoji)
+resp = s.post(REACTIONS_ENDPOINT, headers=headers, json=payload, timeout=cfg.timeout)
 ```
 
 **④ Optionally name the anonymous reactor.**
 
 ```python
-if name:
+if cfg.name:
     user_id = reaction.get("user_id")
     wall_id = attrs.get("wall_id")
     if user_id and wall_id:
         s.patch(
-            f"https://padlet.com/api/1/session/users/{user_id}",
-            headers=api,
-            json={"data": {"attributes": {"name": name, "wallId": wall_id}}},
-            timeout=TIMEOUT,
+            SESSION_USER_ENDPOINT.format(user_id=user_id),
+            headers=headers,
+            json={"data": {"attributes": {"name": cfg.name, "wallId": wall_id}}},
+            timeout=cfg.timeout,
         )
 ```
 
-Leaving `NAME = None` skips this entirely — the server auto-creates an anonymous reactor, so the whole thing stays at three requests.
+Leaving the name unset skips this entirely — the server auto-creates an anonymous reactor, so the whole thing stays at three requests.
 
 That's the conversation the browser was having underneath the interface.
 
@@ -198,32 +201,36 @@ cd Padlet-Like-Bot
 pip install -r requirements.txt
 ```
 
-The only dependency is [`requests`](https://pypi.org/project/requests/) — `pip install requests` works just as well. Python 3.9+.
+The only runtime dependency is [`requests`](https://pypi.org/project/requests/). Python 3.9+.
 
 ---
 
 ## ▶️ Usage
 
-Point the script at a post on a board **you own or are authorized to test** — either by editing `URL` at the top of `like-bot.py`, or without touching the file at all:
+Point it at a post, either with `--url` or via the `PADLET_URL` environment variable:
 
 ```bash
-# macOS / Linux
-PADLET_URL="https://padlet.com/<user>/<board>/wish/<hashid>" python like-bot.py
-
-# Windows PowerShell
-$env:PADLET_URL = "https://padlet.com/<user>/<board>/wish/<hashid>"; python like-bot.py
+python like_bot.py --url "https://padlet.com/<user>/<board>/wish/<hashid>" --dry-run
 ```
 
-Then:
+Start with `--dry-run`. It performs every read step — session, CSRF token, id resolution — then prints the request it *would* send instead of sending it. That confirms your setup works without writing anything:
+
+```text
+[·] dry-run: would POST {'wish_id': 123456, 'value': '2764', 'reaction_type': 'emoji'} for "Demo post" (resolved in 0.61s, CSRF ok, nothing sent)
+
+Done: 1 of 1 dry-run checks passed in 0.62s total (1 at a time).
+```
+
+Then run it for real:
 
 ```bash
-python like-bot.py          # uses the configured COUNT
-python like-bot.py 3        # or pass the count on the command line
+export PADLET_URL="https://padlet.com/<user>/<board>/wish/<hashid>"   # bash/zsh
+$env:PADLET_URL = "https://padlet.com/<user>/<board>/wish/<hashid>"   # PowerShell
+
+python like_bot.py              # 3 reactions, the default
+python like_bot.py 5            # or pass the count
+python like_bot.py 5 --emoji thumbsup --name "Ahmed" --concurrency 4
 ```
-
-With no target set, the script exits `2` and tells you what to configure — it ships with a placeholder URL, not a real post.
-
-Output:
 
 ```text
 [✓] liked "Demo post" with 2764 (anonymous) in 1.47s (reaction id 123456)
@@ -233,45 +240,50 @@ Output:
 Done: 3 of 3 likes placed in 1.67s total (3 at a time).
 ```
 
+With no target configured the run exits `2` and tells you what to set — the repo ships with a placeholder, not a real post.
+
 ---
 
-## ⚙️ Configuration
+## ⚙️ Options
 
-Everything tunable sits at the top of `like-bot.py`.
-
-| Setting | Default | What it does |
-|---|---|---|
-| `URL` | placeholder | The `…/wish/<hashid>` link of the target post. Overridden by the `PADLET_URL` environment variable. |
-| `EMOJI` | `"2764"` | Reaction, as a Unicode code point in hex. |
-| `NAME` | `None` | `None` reacts anonymously (one request). A string attaches a display name (adds a PATCH). |
-| `COUNT` | `3` | How many reactions to place. Overridable via `argv[1]`. |
-| `CONCURRENCY` | `12` | How many run at the same time. |
-| `TIMEOUT` | `20` | Per-request timeout, in seconds. |
-| `UA` | Chrome 120 | User-Agent sent on every request. |
-
-### Emoji values
-
-| Reaction | Value |
-|:---:|---|
-| ❤️ | `2764` |
-| 👍 | `1f44d` |
-| 😂 | `1f602` |
-| 🥳 | `1f973` |
-| 😆 | `1f606` |
-
-```python
-EMOJI = "1f44d"   # 👍
+```text
+python like_bot.py [count] [options]
 ```
+
+| Option | Default | What it does |
+|---|---|---|
+| `count` | `3` | Positional. How many reactions to place. |
+| `--url` | `$PADLET_URL` | Target post — a `…/wish/<hashid>` link. Validated before anything is sent. |
+| `--emoji` | `2764` | Hex code point or alias — see `--list-emoji`. |
+| `--name` | *(none)* | Attribute reactions to a display name (adds the PATCH). |
+| `--concurrency` | `12` | How many run at the same time. |
+| `--timeout` | `20` | Per-request timeout, in seconds. |
+| `--dry-run` | off | Resolve everything, print the request, send nothing. |
+| `--list-emoji` | — | Print the supported reaction values and exit. |
+| `--version` | — | Print the version and exit. |
+
+### Reaction values
+
+Padlet identifies reactions by Unicode code point in hex. Aliases are accepted for readability:
+
+| Reaction | Value | Alias |
+|:---:|---|---|
+| ❤️ | `2764` | `heart` |
+| 👍 | `1f44d` | `thumbsup` |
+| 😂 | `1f602` | `joy` |
+| 🥳 | `1f973` | `party` |
+| 😆 | `1f606` | `grin` |
 
 ### Concurrency
 
-Keep this modest — 10–15 is the sweet spot. The run still finishes fast, but a steady stream keeps each request around 1.4 s and avoids the timeouts and connection resets you get when firing hundreds at once. The pool never exceeds the work available:
+Keep it modest — 10–15 is the sweet spot. The run still finishes fast, but a steady stream keeps each request around 1.4 s and avoids the timeouts and connection resets you get when firing hundreds at once. The pool never exceeds the work available:
 
 ```python
-workers = min(CONCURRENCY, count)
+def worker_count(concurrency: int, count: int) -> int:
+    return max(1, min(concurrency, count))
 ```
 
-For debugging, drop it to `CONCURRENCY = 2` so the log stays readable.
+For debugging, `--concurrency 1` keeps the log readable.
 
 ---
 
@@ -289,16 +301,16 @@ Main thread ─────┼── Worker 2 ── GET → resolve → POST
                  └── Worker N ── GET → resolve → POST
 ```
 
-Because the work is network-bound rather than CPU-bound, threads are the right tool here — the GIL is released while each request is in flight. Every worker is wrapped so one failure can't take down the rest:
+Because the work is network-bound rather than CPU-bound, threads are the right tool here — the GIL is released while each request is in flight. Every worker is isolated so one failure can't take down the batch:
 
 ```python
-def _one(i):
+def _run_one(cfg: Config, index: int) -> bool:
     try:
-        return like()
-    except requests.RequestException as e:
-        print(f"[x] like {i + 1}: network error: {e}")
-    except Exception as e:
-        print(f"[x] like {i + 1}: failed: {e}")
+        return place_reaction(cfg)
+    except requests.RequestException as exc:
+        print(f"[x] like {index + 1}: network error: {exc}")
+    except Exception as exc:
+        print(f"[x] like {index + 1}: failed: {exc}")
     return False
 ```
 
@@ -336,22 +348,20 @@ Padlet embeds a Rails CSRF token in the page HTML. The script scrapes it and mir
 | `Origin` | `https://padlet.com` |
 | `Content-Type` | `application/json` |
 
-Miss any of these and the API answers with a rejection rather than a reaction.
+Miss the token and the API answers `422` rather than placing a reaction.
 
 ---
 
 ## 🪟 Windows support
 
-Legacy console encodings choke on `✓` and raise a `charmap` error mid-run. The script fixes stdout on startup:
+Legacy console encodings choke on `✓` and raise a `charmap` error mid-run. The CLI fixes stdout on startup:
 
 ```python
-try:
+with contextlib.suppress(Exception):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
 ```
 
-So `python like-bot.py` just works, with no `chcp 65001` or `PYTHONIOENCODING` dance first.
+So `python like_bot.py` just works, with no `chcp 65001` or `PYTHONIOENCODING` dance first.
 
 ---
 
@@ -361,17 +371,41 @@ Failures are reported per worker and never abort the batch:
 
 ```text
 [x] like 2: network error: HTTPSConnectionPool(...)
-[x] like 2: failed: Could not find CSRF token — page layout changed or blocked.
+[x] like 2: failed: Could not find CSRF token — page layout changed, or the request was blocked.
 [x] reaction failed: HTTP 403 ...
 ```
 
 Common causes: changed API version, changed page markup, invalid CSRF context, board permissions, sign-in requirements, rate limiting, anti-abuse protection, or plain network trouble.
 
-The process exits `0` only when every reaction succeeded, `1` when any failed, and `2` when no target post is configured — so it drops straight into a test pipeline:
+| Exit code | Meaning |
+|:---:|---|
+| `0` | every reaction succeeded |
+| `1` | one or more failed |
+| `2` | misconfigured — no target, bad URL, unknown emoji |
+
+Which makes it usable in a pipeline:
 
 ```bash
-python like-bot.py 1 && echo "smoke test passed"
+python like_bot.py 1 --dry-run && echo "smoke test passed"
 ```
+
+---
+
+## 🧪 Development
+
+```bash
+pip install -r requirements-dev.txt
+ruff check . && ruff format --check .
+pytest -q
+```
+
+The test suite is **fully offline** — no network, no live board. `requests.Session` is
+replaced with a fake that records every call, so the tests assert on the real thing:
+that the flow makes exactly three requests, that the POST body matches the captured
+payload byte for byte, that the CSRF token reaches the header, that `--dry-run` never
+issues a write, and that each exit code fires when it should.
+
+CI runs lint, format check, and the suite on Python 3.9 – 3.13.
 
 ---
 
@@ -379,9 +413,15 @@ python like-bot.py 1 && echo "smoke test passed"
 
 ```text
 Padlet-Like-Bot
-├── like-bot.py         # the whole implementation
-├── requirements.txt    # requests
-├── .gitignore
+├── like_bot.py             # the implementation + CLI
+├── tests/
+│   └── test_like_bot.py    # offline tests, fake session
+├── HOW-I-FOUND-IT.md       # the DevTools → Python walkthrough
+├── .github/workflows/ci.yml
+├── pyproject.toml          # ruff + pytest config
+├── requirements.txt
+├── requirements-dev.txt
+├── LICENSE
 └── README.md
 ```
 
@@ -415,6 +455,7 @@ Same result, without the browser and JavaScript layers to launch, render, wait f
 - CSRF token handling
 - public-to-internal id resolution
 - controlled concurrency with `ThreadPoolExecutor`
+- testing a network client without touching the network
 - migrating Selenium scripts to plain HTTP
 
 ---
@@ -444,5 +485,5 @@ Chrome + Selenium + WebDriver + DOM search + JS rendering + ~40 s
 ### Don't automate the browser when the real conversation is happening over HTTP. ⚡
 
 <p align="center">
-  <sub>Built with Python 🐍 · requests 🌐 · ThreadPoolExecutor 🧵 · and a lot of network inspection 🔍</sub>
+  <sub>MIT licensed · Built with Python 🐍 · requests 🌐 · ThreadPoolExecutor 🧵 · and a lot of network inspection 🔍</sub>
 </p>
