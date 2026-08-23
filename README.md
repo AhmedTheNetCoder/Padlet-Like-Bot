@@ -124,7 +124,7 @@ And the payload needs the post's **internal numeric id**, while the URL only exp
 
 ## 🔥 The core
 
-Everything hangs off one session, so cookies survive between the three calls:
+Everything hangs off one session, so cookies and the browser User-Agent carry across every call:
 
 ```python
 s = requests.Session()
@@ -173,13 +173,18 @@ resp = s.post(
 
 ```python
 if name:
-    s.patch(
-        f"https://padlet.com/api/1/session/users/{user_id}",
-        headers=api,
-        json={"data": {"attributes": {"name": name, "wallId": wall_id}}},
-        timeout=TIMEOUT,
-    )
+    user_id = reaction.get("user_id")
+    wall_id = attrs.get("wall_id")
+    if user_id and wall_id:
+        s.patch(
+            f"https://padlet.com/api/1/session/users/{user_id}",
+            headers=api,
+            json={"data": {"attributes": {"name": name, "wallId": wall_id}}},
+            timeout=TIMEOUT,
+        )
 ```
+
+Leaving `NAME = None` skips this entirely — the server auto-creates an anonymous reactor, so the whole thing stays at three requests.
 
 That's the conversation the browser was having underneath the interface.
 
@@ -402,7 +407,7 @@ HTTP automation attaches near the bottom and skips the rest:
 User → Browser UI → JavaScript → [ API ] ← requests → Server
 ```
 
-Same result, four fewer layers to render, wait for, and debug. Useful as a worked example of:
+Same result, without the browser and JavaScript layers to launch, render, wait for, and debug. Useful as a worked example of:
 
 - reverse-engineering traffic with browser DevTools
 - reproducing REST calls in Python
@@ -427,8 +432,9 @@ Do **not** use it to inflate engagement, competitions, polls, votes, analytics, 
 This relies on implementation details observed in Padlet's web client. Endpoints like:
 
 ```text
-GET  /api/9/wishes/<hashid>
-POST /api/7/reactions
+GET   /api/9/wishes/<hashid>
+POST  /api/7/reactions
+PATCH /api/1/session/users/<user_id>
 ```
 
 are **not** documented public APIs. The version numbers in those paths are a strong hint that they change. Padlet may alter endpoint versions, auth requirements, CSRF behaviour, session handling, JSON shapes, permissions, or reaction semantics at any time — and this proof-of-concept will need updating when they do.
