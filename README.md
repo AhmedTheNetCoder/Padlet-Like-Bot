@@ -419,14 +419,6 @@ Same result, without the browser and JavaScript layers to launch, render, wait f
 
 ---
 
-## ⚠️ Intended use
-
-This repository exists for **education, research, and testing boards you own or have explicit permission to test.**
-
-Do **not** use it to inflate engagement, competitions, polls, votes, analytics, or reactions belonging to anyone else. Automated interaction may also be limited by Padlet's Terms of Service and technical safeguards. Keep the request volume to the minimum your test actually needs.
-
----
-
 ## 🔧 API stability
 
 This relies on implementation details observed in Padlet's web client. Endpoints like:
